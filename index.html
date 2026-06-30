@@ -145,8 +145,8 @@ const MENU = [
   {id:'wings6',name:'6 pcs Wings',desc:'Choose 2 flavors. Perfect for sharing!',options:[{label:'6 pcs - 2 Flavors',price:139}],flavors:2,img:IMG_ACTUAL1,badge:''},
   {id:'poppers',name:'Chicken Poppers (w/ Rice)',desc:'Crispy poppers + steamed rice. Malilit sa size, malaki sa sarap!',options:[{label:'With Rice',price:95}],flavors:1,img:IMG_ACTUAL4,badge:'new'},
   {id:'poppers2',name:'Chicken Poppers (No Rice)',desc:'Bigger serving, perfect for sharing!',options:[{label:'No Rice - Bigger Serving',price:149}],flavors:1,img:IMG_ACTUAL4,badge:'new'},
-  {id:'fillet1',name:'1 pc Chicken Fillet',desc:'Homemade. Malinis, malambot, super juicy!',options:[{label:'With Rice',price:95}],flavors:1,img:IMG_ACTUAL2,badge:''},
-  {id:'fillet2',name:'2 pcs Chicken Fillet',desc:'Bigger serving, better value!',options:[{label:'With Rice',price:169}],flavors:1,img:IMG_ACTUAL2,badge:''},
+  {id:'fillet1',name:'1 pc Chicken Fillet with Rice',desc:'Homemade. Malinis, malambot, super juicy!',options:[{label:'With Rice',price:95}],flavors:1,img:IMG_ACTUAL2,badge:''},
+  {id:'fillet2',name:'2 pcs Chicken Fillet with Rice',desc:'Bigger serving, better value!',options:[{label:'With Rice',price:169}],flavors:1,img:IMG_ACTUAL2,badge:''},
   {id:'bilao30',name:'30 pcs Party Bilao',desc:'Choose 3 flavors. Perfect for sharing!',options:[{label:'30 pcs - 3 Flavors',price:699}],flavors:3,img:IMG_ACTUAL8,badge:'party'},
   {id:'bilao60',name:'60 pcs Party Bilao',desc:'Choose 5 flavors. Made to satisfy!',options:[{label:'60 pcs - 5 Flavors',price:1399}],flavors:5,img:IMG_ACTUAL8,badge:'party'},
   {id:'bilao90',name:'90 pcs Party Bilao',desc:'Choose 6 flavors. The ultimate party tray!',options:[{label:'90 pcs - 6 Flavors',price:2199}],flavors:6,img:IMG_ACTUAL8,badge:'party'},
@@ -166,6 +166,43 @@ const ADMIN = {user:'disneywings',pass:'admin2024'};
 const GCASH_NUMBER = '09385737920';
 const GCASH_NAME = 'AN*****A S.';
 
+// Base point: Alfamart Tatala, Binangonan, Rizal
+// Delivery fee: ₱20 for 1st km, ₱10 per additional km (estimated distance, rounded up)
+const FIRST_KM_FEE = 20;
+const ADDITIONAL_KM_FEE = 10;
+const BARANGAYS = [
+  {name:'Tatala',km:1},
+  {name:'Batingan',km:2},
+  {name:'Mambog',km:2},
+  {name:'Macamot',km:3},
+  {name:'Mahabang Parang',km:3},
+  {name:'Calumpang (Poblacion)',km:5},
+  {name:'Libid (Poblacion)',km:6},
+  {name:'Layunan (Poblacion)',km:6},
+  {name:'Libis (Poblacion)',km:7},
+  {name:'Lunsad',km:7},
+  {name:'Pantok',km:8},
+  {name:'Darangan',km:9},
+  {name:'Bilibiran',km:9},
+  {name:'Palangoy',km:10},
+  {name:'Tagpos',km:10},
+  {name:'San Carlos',km:11},
+  {name:'Tayuman',km:11},
+  {name:'Pag-asa',km:12},
+  {name:'Ithan',km:9},
+  {name:'Kalinawan',km:10},
+  {name:'Pipindan',km:11},
+  {name:'Pila-pila',km:9},
+  {name:'Limbon-limbon',km:10},
+  {name:'Iba pang Barangay (tatawagan namin kayo)',km:null},
+];
+function computeDeliveryFee(barangayName){
+  const b = BARANGAYS.find(x=>x.name===barangayName);
+  if(!b || b.km===null) return null; // unknown/island barangay - needs manual quote
+  if(b.km<=1) return FIRST_KM_FEE;
+  return FIRST_KM_FEE + (b.km-1)*ADDITIONAL_KM_FEE;
+}
+
 // In-memory storage (persists during this session only)
 let MEMORY_ORDERS = [];
 let MEMORY_USERS = {};
@@ -180,6 +217,8 @@ let state = {
   page:'home',loggedIn:false,isAdmin:false,user:null,
   cart:[],orders:loadOrders(),orderSuccess:false,receipt:null,
   pendingOrder:null, // order waiting for GCash payment confirmation
+  proofOfPayment:null, // base64 screenshot of GCash proof
+  deliveryFee:null,
   loginForm:{user:'',pass:''},
   modal:null,activeTab:'menu',
 };
@@ -383,7 +422,7 @@ function renderCartPage(){
           </div>
         `).join('')}
       </div>
-      <div class="cart-total">Total: ₱${total.toLocaleString()}</div>
+      <div class="cart-total">Subtotal: ₱${total.toLocaleString()}</div>
       <div class="sec-title">📝 Impormasyon sa Delivery</div>
       <div class="order-form">
         <div class="form-group">
@@ -391,8 +430,15 @@ function renderCartPage(){
           <input type="text" id="f-name" placeholder="Buong pangalan mo">
         </div>
         <div class="form-group">
-          <label>Address / Location *</label>
-          <input type="text" id="f-location" placeholder="Barangay, Lungsod/Bayan">
+          <label>Barangay *</label>
+          <select id="f-barangay" onchange="onBarangayChange()">
+            <option value="">-- Piliin ang Barangay --</option>
+            ${BARANGAYS.map(b=>`<option value="${b.name}">${b.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Address / Street / Purok *</label>
+          <input type="text" id="f-location" placeholder="Bahay/Street/Purok, Barangay">
         </div>
         <div class="form-group">
           <label>Landmark *</label>
@@ -402,9 +448,10 @@ function renderCartPage(){
           <label>Contact Number *</label>
           <input type="tel" id="f-cp" placeholder="09XXXXXXXXX">
         </div>
-        <div class="form-group">
-          <label>Halaga na Babayaran</label>
-          <input type="text" value="₱${total.toLocaleString()}" readonly style="background:#222;color:#f5c518;font-weight:700;">
+        <div style="background:rgba(245,197,24,0.08);border:1px solid rgba(245,197,24,0.2);border-radius:8px;padding:10px;font-size:12px;margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;color:#aaa;"><span>Subtotal</span><span id="fee-subtotal">₱${total.toLocaleString()}</span></div>
+          <div style="display:flex;justify-content:space-between;color:#aaa;margin-top:3px;"><span>🛵 Delivery Fee</span><span id="fee-delivery" style="color:#f5c518;font-weight:700;">Piliin ang barangay</span></div>
+          <div style="display:flex;justify-content:space-between;color:#fff;font-weight:900;font-size:14px;margin-top:6px;border-top:1px solid #333;padding-top:6px;"><span>TOTAL</span><span id="fee-total">₱${total.toLocaleString()}</span></div>
         </div>
         <div class="form-group">
           <label>Mode of Payment *</label>
@@ -413,7 +460,7 @@ function renderCartPage(){
           </select>
         </div>
         <div style="background:rgba(245,197,24,0.08);border:1px solid rgba(245,197,24,0.2);border-radius:8px;padding:10px;font-size:11px;color:#aaa;margin-bottom:14px;line-height:1.6;">
-          🛵 Delivery fee: <b style="color:#f5c518">₱20 para sa unang 1km</b><br>
+          🛵 Delivery fee: <b style="color:#f5c518">₱20 sa unang 1km, ₱10 bawat sumunod na km</b> mula Alfamart Tatala, Binangonan, Rizal<br>
           📞 Tatawagan ka namin sa: <b style="color:#f5c518">09302979452</b><br>
           📘 FB Page: <b style="color:#f5c518">Disney Wing's</b>
         </div>
@@ -448,8 +495,13 @@ function renderGcashPage(){
         <div style="color:#aaa;font-size:11px;">Amount na Ipapadala</div>
         <div style="color:#f5c518;font-size:26px;font-weight:900;">₱${o.total.toLocaleString()}</div>
       </div>
-      <p style="color:#888;font-size:11px;margin-bottom:14px;">Pagkatapos magbayad, i-click ang button sa baba. Ipapakita ang resibo at ipapasa namin ang order mo agad.</p>
-      <button class="btn btn-green" style="width:100%;padding:13px;font-size:15px;" onclick="confirmGcashPayment()">
+      <p style="color:#888;font-size:11px;margin-bottom:14px;">Pagkatapos magbayad, i-upload ang screenshot ng proof of payment bago ma-proceed sa resibo — para iwas scam.</p>
+      <div class="form-group" style="text-align:left;">
+        <label>📎 Proof of Payment (Screenshot) *</label>
+        <input type="file" id="f-proof" accept="image/*" onchange="onProofUpload()">
+        <div id="proof-preview" style="margin-top:8px;"></div>
+      </div>
+      <button class="btn btn-green" id="btn-confirm-gcash" style="width:100%;padding:13px;font-size:15px;opacity:0.5;cursor:not-allowed;" disabled onclick="confirmGcashPayment()">
         ✅ Nabayaran Ko Na — Kumpirmahin
       </button>
       <button class="btn btn-outline" style="width:100%;padding:10px;font-size:13px;margin-top:8px;" onclick="cancelGcashOrder()">
@@ -501,7 +553,7 @@ function renderReceipt(o){
     <hr class="receipt-divider">
     <div style="font-size:11px;color:#333;margin-bottom:6px;">
       <b>Customer:</b> ${o.name}<br>
-      <b>Address:</b> ${o.location}<br>
+      <b>Address:</b> ${o.location}, Brgy. ${o.barangay||''}<br>
       <b>Landmark:</b> ${o.landmark}<br>
       <b>Contact:</b> ${o.cp}
     </div>
@@ -517,9 +569,27 @@ function renderReceipt(o){
       </div>
     `).join('')}
     <hr class="receipt-divider">
+    <div class="receipt-row"><span>Subtotal</span><span>₱${(o.subtotal!==undefined?o.subtotal:o.total).toLocaleString()}</span></div>
+    <div class="receipt-row"><span>🛵 Delivery Fee</span><span>₱${(o.deliveryFee||0).toLocaleString()}</span></div>
     <div class="receipt-row total">
       <span>TOTAL NA BABAYARAN</span><span>₱${o.total.toLocaleString()}</span>
     </div>
+    ${(() => {
+      const loy = getLoyaltyInfo(o.username, o.orderNum);
+      if(!loy) return '';
+      const stars = Array.from({length:10},(_,i)=>i+1).map(n=>
+        `<div style="width:22px;height:22px;border-radius:50%;border:1.5px solid ${n<=loy.stampInCycle?'#b8860b':'#ccc'};background:${n<=loy.stampInCycle?'#f5c518':'#fff'};display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#111;margin:1px;">${n}</div>`
+      ).join('');
+      return `
+      <hr class="receipt-divider">
+      <div style="text-align:center;font-size:11px;font-weight:800;color:#b8860b;margin-bottom:6px;">⭐ DISNEY WINGS LOYALTY CARD ⭐</div>
+      <div style="text-align:center;">${stars}</div>
+      <div style="text-align:center;font-size:10px;color:#555;margin-top:6px;">
+        Order #${loy.countSoFar} mo sa amin! (Stamp ${loy.stampInCycle}/10)
+      </div>
+      ${loy.rewardEarned?`<div style="text-align:center;background:#f5c518;color:#111;font-weight:900;font-size:11px;padding:6px;border-radius:6px;margin-top:6px;">🎉 NA-UNLOCK MO ANG FREE 3 WINGS! Sabihin lang sa susunod na order mo.</div>`:`<div style="text-align:center;font-size:10px;color:#777;margin-top:4px;">${10-loy.stampInCycle} order na lang para sa FREE 3 Wings!</div>`}
+      `;
+    })()}
     <div style="display:flex;justify-content:space-between;font-size:11px;margin-top:4px;color:#555;">
       <span>Mode of Payment:</span><span>${o.payment}${o.payment==='GCash'?' (Paid ✓)':''}</span>
     </div>
@@ -598,10 +668,12 @@ function renderAdmin(){
             <b style="color:#f5c518;">#${o.orderNum} — ${o.name}</b>
             <div style="color:#aaa;font-size:11px;margin-top:2px;">📞 ${o.cp} | ${o.payment}${o.payment==='GCash'?' ✓ PAID':''}</div>
             <div style="color:#666;font-size:10px;">${new Date(o.timestamp).toLocaleString('en-PH')}</div>
+            ${(()=>{const loy=getLoyaltyInfo(o.username,o.orderNum); return loy?`<div style="color:#f5c518;font-size:10px;margin-top:2px;">⭐ Stamp ${loy.stampInCycle}/10 (Order #${loy.countSoFar} ni ${o.username})${loy.rewardEarned?' — 🎉 FREE 3 WINGS!':''}</div>`:'';})()}
           </div>
           <span class="order-status status-${o.status}">${o.status.replace('_',' ').toUpperCase()}</span>
         </div>
-        <div style="font-size:11px;color:#aaa;margin-bottom:6px;">📍 ${o.location} | Landmark: ${o.landmark}</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:6px;">📍 ${o.location}, Brgy. ${o.barangay||'-'} | Landmark: ${o.landmark} | 🛵 Delivery: ₱${(o.deliveryFee||0).toLocaleString()}</div>
+        ${o.payment==='GCash'?`<div style="font-size:11px;color:#4299e1;margin-bottom:6px;">📱 GCash Proof of Payment: ${o.proofOfPayment?`<a href="${o.proofOfPayment}" target="_blank" style="color:#4299e1;">Tingnan ang screenshot</a>`:'<span style="color:#e53e3e;">Wala pang na-upload</span>'}</div>`:''}
         <div style="font-size:12px;color:#ccc;margin-bottom:6px;">
           ${o.items.map(i=>`• ${i.name} (${i.option})${i.flavors&&i.flavors.length?' - '+i.flavors.join(', '):''} — ₱${i.price}`).join('<br>')}
         </div>
@@ -618,6 +690,33 @@ function renderAdmin(){
 }
 
 // ACTIONS
+function onBarangayChange(){
+  const sel = document.getElementById('f-barangay');
+  const barangay = sel.value;
+  const subtotal = state.cart.reduce((a,i)=>a+i.price,0);
+  const feeEl = document.getElementById('fee-delivery');
+  const totalEl = document.getElementById('fee-total');
+  if(!barangay){
+    feeEl.textContent = 'Piliin ang barangay';
+    feeEl.style.color = '#aaa';
+    totalEl.textContent = '₱'+subtotal.toLocaleString();
+    state.deliveryFee = null;
+    return;
+  }
+  const fee = computeDeliveryFee(barangay);
+  if(fee === null){
+    feeEl.textContent = 'Tatawagan ka namin para sa quote';
+    feeEl.style.color = '#f5c518';
+    totalEl.textContent = '₱'+subtotal.toLocaleString()+' + TBD';
+    state.deliveryFee = null;
+  } else {
+    feeEl.textContent = '₱'+fee.toLocaleString();
+    feeEl.style.color = '#f5c518';
+    totalEl.textContent = '₱'+(subtotal+fee).toLocaleString();
+    state.deliveryFee = fee;
+  }
+}
+
 function setTab(t){state.activeTab=t;render();}
 function goHome(){state.page='home';render();}
 function goCart(){state.page='cart';render();}
@@ -654,18 +753,40 @@ function nextOrderNum(){
   return String(n).padStart(4,'0');
 }
 
+// Counts how many orders this username has placed, in order, returning
+// {countSoFar, stampInCycle, rewardEarned} as of and including the given orderNum.
+function getLoyaltyInfo(username, orderNum){
+  if(!username || username==='Guest') return null;
+  const userOrders = state.orders
+    .filter(o=>o.username===username)
+    .sort((a,b)=>a.timestamp-b.timestamp);
+  const idx = userOrders.findIndex(o=>o.orderNum===orderNum);
+  const countSoFar = idx>=0 ? idx+1 : userOrders.length;
+  const stampInCycle = ((countSoFar-1)%10)+1; // 1-10
+  const rewardEarned = countSoFar>0 && countSoFar%10===0;
+  return {countSoFar, stampInCycle, rewardEarned};
+}
+
 function submitOrder(){
   const nm=document.getElementById('f-name')?.value.trim();
+  const barangay=document.getElementById('f-barangay')?.value;
   const lc=document.getElementById('f-location')?.value.trim();
   const lm=document.getElementById('f-landmark')?.value.trim();
   const cp=document.getElementById('f-cp')?.value.trim();
   const pay=document.getElementById('f-pay')?.value||'Cash on Delivery';
-  if(!nm||!lc||!lm||!cp){alert('Punan ang lahat ng fields!');return;}
-  const total=state.cart.reduce((a,i)=>a+i.price,0);
+  if(!nm||!barangay||!lc||!lm||!cp){alert('Punan ang lahat ng fields, kasama ang Barangay!');return;}
+  const deliveryFee = computeDeliveryFee(barangay);
+  if(deliveryFee===null){
+    alert('Para sa barangay na ito, tatawagan ka muna namin para sa delivery fee bago ma-confirm ang order. I-message mo na lang kami sa Facebook Page: Disney Wing\'s, o tawagan ang 09302979452.');
+    return;
+  }
+  const subtotal=state.cart.reduce((a,i)=>a+i.price,0);
+  const total=subtotal+deliveryFee;
   const orderDraft={
     orderNum: nextOrderNum(),
-    name:nm,location:lc,landmark:lm,cp,payment:pay,
-    items:[...state.cart],total,
+    username: state.user||'Guest',
+    name:nm,barangay,location:lc,landmark:lm,cp,payment:pay,
+    items:[...state.cart],subtotal,deliveryFee,total,
     timestamp: Date.now()
   };
 
@@ -694,14 +815,40 @@ function finalizeOrder(orderDraft){
   render();
 }
 
+function onProofUpload(){
+  const fileInput = document.getElementById('f-proof');
+  const file = fileInput.files[0];
+  const btn = document.getElementById('btn-confirm-gcash');
+  const preview = document.getElementById('proof-preview');
+  if(!file){
+    state.proofOfPayment = null;
+    btn.disabled = true; btn.style.opacity='0.5'; btn.style.cursor='not-allowed';
+    preview.innerHTML='';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = function(e){
+    state.proofOfPayment = e.target.result;
+    preview.innerHTML = `<img src="${e.target.result}" style="max-width:160px;border-radius:8px;border:2px solid #38a169;">`;
+    btn.disabled = false; btn.style.opacity='1'; btn.style.cursor='pointer';
+  };
+  reader.readAsDataURL(file);
+}
+
 function confirmGcashPayment(){
   if(!state.pendingOrder) return;
-  const order = {...state.pendingOrder, status:'new'};
+  if(!state.proofOfPayment){
+    alert('I-upload muna ang screenshot ng proof of payment bago ma-confirm ang order.');
+    return;
+  }
+  const order = {...state.pendingOrder, status:'new', proofOfPayment: state.proofOfPayment};
+  state.proofOfPayment = null;
   finalizeOrder(order);
 }
 
 function cancelGcashOrder(){
   state.pendingOrder = null;
+  state.proofOfPayment = null;
   state.page = 'cart';
   render();
 }
