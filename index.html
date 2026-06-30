@@ -316,10 +316,12 @@ function renderHomePage(){
   <div class="section">
     <div class="tabs">
       <button class="tab ${state.activeTab==='menu'?'active':''}" onclick="setTab('menu')">🍗 Menu</button>
+      ${state.loggedIn&&!state.isAdmin?`<button class="tab ${state.activeTab==='myorders'?'active':''}" onclick="setTab('myorders')">📦 My Orders</button>`:''}
       <button class="tab ${state.activeTab==='gallery'?'active':''}" onclick="setTab('gallery')">📸 Gallery</button>
       <button class="tab ${state.activeTab==='info'?'active':''}" onclick="setTab('info')">ℹ️ Info</button>
     </div>
     ${state.activeTab==='menu'?renderMenu():''}
+    ${state.activeTab==='myorders'?renderMyOrders():''}
     ${state.activeTab==='gallery'?renderGallery():''}
     ${state.activeTab==='info'?renderInfo():''}
   </div>`;
@@ -355,6 +357,38 @@ function renderMenu(){
         </button>
       </div>
     `:''}`;
+}
+
+function renderMyOrders(){
+  const STATUS_LABEL = {
+    new:'🆕 Natanggap', pending_payment:'⏳ Hinihintay ang Bayad',
+    preparing:'👨‍🍳 Hinahanda', ready:'🛵 Paparating na / Ready', done:'✅ Tapos na'
+  };
+  const myOrders = state.orders
+    .filter(o=>o.username===state.user)
+    .sort((a,b)=>b.timestamp-a.timestamp);
+  if(!myOrders.length){
+    return `<div class="sec-title">📦 My Orders</div>
+    <div class="empty-cart">Wala ka pang order. Mag-order na sa Menu tab! 🍗</div>`;
+  }
+  return `<div class="sec-title">📦 My Orders</div>
+  ${myOrders.map(o=>{
+    const d = new Date(o.timestamp);
+    return `<div class="order-ticket">
+      <div class="order-ticket-header">
+        <b style="color:#f5c518;">Order #${o.orderNum}</b>
+        <span class="order-status status-${o.status}">${(STATUS_LABEL[o.status]||o.status).toUpperCase()}</span>
+      </div>
+      <div style="color:#999;font-size:11px;margin-bottom:6px;">${d.toLocaleString('en-PH')}</div>
+      <div style="color:#ccc;font-size:12px;margin-bottom:8px;">
+        ${o.items.map(i=>i.name).join(', ')}
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="color:#f5c518;font-weight:700;font-size:13px;">₱${o.total.toLocaleString()}</span>
+        <button class="btn btn-outline" style="padding:5px 12px;font-size:11px;" onclick="viewReceipt('${o.orderNum}')">🧾 Tingnan ang Resibo</button>
+      </div>
+    </div>`;
+  }).join('')}`;
 }
 
 function renderGallery(){
@@ -768,7 +802,13 @@ function onBarangayChange(){
   }
 }
 
-function setTab(t){state.activeTab=t;render();}
+function setTab(t){
+  state.activeTab=t;
+  render();
+  if(t==='myorders'){
+    loadOrders().then(orders=>{ state.orders=orders; if(state.activeTab==='myorders') render(); });
+  }
+}
 function goHome(){state.page='home';render();}
 function goCart(){state.page='cart';render();}
 async function goAdmin(){
@@ -809,15 +849,24 @@ function nextOrderNum(){
   return String(n).padStart(4,'0');
 }
 
-// Counts how many orders this username has placed, in order, returning
-// {countSoFar, stampInCycle, rewardEarned} as of and including the given orderNum.
+// Counts how many DAYS this username has ordered on (1 stamp per day, regardless
+// of how many orders are placed that same day), returning
+// {countSoFar, stampInCycle, rewardEarned} as of and including the day of the given orderNum.
 function getLoyaltyInfo(username, orderNum){
   if(!username || username==='Guest') return null;
   const userOrders = state.orders
     .filter(o=>o.username===username)
     .sort((a,b)=>a.timestamp-b.timestamp);
-  const idx = userOrders.findIndex(o=>o.orderNum===orderNum);
-  const countSoFar = idx>=0 ? idx+1 : userOrders.length;
+  const order = userOrders.find(o=>o.orderNum===orderNum);
+  if(!order) return null;
+  // Build list of unique order-days in chronological order (1 stamp per day)
+  const uniqueDays = [];
+  userOrders.forEach(o=>{
+    const d = new Date(o.timestamp).toDateString();
+    if(!uniqueDays.includes(d)) uniqueDays.push(d);
+  });
+  const orderDay = new Date(order.timestamp).toDateString();
+  const countSoFar = uniqueDays.indexOf(orderDay)+1;
   const stampInCycle = ((countSoFar-1)%10)+1; // 1-10
   const rewardEarned = countSoFar>0 && countSoFar%10===0;
   return {countSoFar, stampInCycle, rewardEarned};
