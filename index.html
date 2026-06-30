@@ -331,9 +331,22 @@ async function sendMessage(username, sender, text){
   try{
     await fetch(`${FIREBASE_DB_URL}/messages/${username}.json`,{
       method:'POST',
-      body: JSON.stringify({ sender, text: text.trim(), timestamp: Date.now(), readByAdmin: sender==='admin' })
+      body: JSON.stringify({ sender, text: text.trim(), timestamp: Date.now(), readByAdmin: sender==='admin', readByCustomer: sender==='customer' })
     });
   }catch(e){ console.error('sendMessage error',e); }
+}
+async function markThreadReadByCustomer(username){
+  if(!FIREBASE_DB_URL) return;
+  try{
+    const res = await fetch(`${FIREBASE_DB_URL}/messages/${username}.json`);
+    const data = await res.json();
+    if(!data) return;
+    const updates = {};
+    Object.entries(data).forEach(([id,m])=>{ if(m.sender==='admin'&&!m.readByCustomer) updates[id]={...m, readByCustomer:true}; });
+    if(Object.keys(updates).length){
+      await fetch(`${FIREBASE_DB_URL}/messages/${username}.json`,{ method:'PATCH', body: JSON.stringify(updates) });
+    }
+  }catch(e){ console.error('markThreadReadByCustomer error',e); }
 }
 async function markThreadReadByAdmin(username){
   if(!FIREBASE_DB_URL) return;
@@ -360,7 +373,7 @@ let state = {
   loginForm:{user:'',pass:''},
   modal:null,activeTab:'menu',
   users:{}, visits:[], adminTab:'orders', // for admin "Users & Visits" view
-  chatMessages:[], chatPollHandle:null, // customer chat state
+  chatMessages:[], chatPollHandle:null, customerHasUnread:false, // customer chat state
   chatThreads:[], adminChatUser:null, adminChatMessages:[], adminChatPollHandle:null, // admin chat state
 };
 
@@ -368,10 +381,24 @@ function render(){
   const app=document.getElementById('app');
   if(state.page==='login'){app.innerHTML=renderLogin();return;}
   if(state.page==='admin'){app.innerHTML=renderNav()+renderAdmin();return;}
-  if(state.page==='cart'){app.innerHTML=renderNav()+renderCartPage();return;}
-  if(state.page==='gcash'){app.innerHTML=renderNav()+renderGcashPage();return;}
-  if(state.page==='receipt'){app.innerHTML=renderNav()+renderReceiptPage();return;}
-  app.innerHTML=renderNav()+renderHomePage();
+  if(state.page==='cart'){app.innerHTML=renderNav()+renderCartPage()+renderChatFAB();return;}
+  if(state.page==='gcash'){app.innerHTML=renderNav()+renderGcashPage()+renderChatFAB();return;}
+  if(state.page==='receipt'){app.innerHTML=renderNav()+renderReceiptPage()+renderChatFAB();return;}
+  app.innerHTML=renderNav()+renderHomePage()+renderChatFAB();
+}
+
+// Floating "message us" button — visible on every customer page so they can reach out anytime.
+function renderChatFAB(){
+  if(!state.loggedIn || state.isAdmin) return '';
+  if(state.activeTab==='chat' && state.page==='home') return ''; // already viewing chat
+  const dot = state.customerHasUnread?`<span style="position:absolute;top:-2px;right:-2px;width:12px;height:12px;background:#e53e3e;border:2px solid #0a0a0a;border-radius:50%;"></span>`:'';
+  return `<button onclick="openCustomerChatFromFab()" style="position:fixed;bottom:18px;right:18px;width:54px;height:54px;border-radius:50%;background:#f5c518;border:none;box-shadow:0 4px 14px rgba(0,0,0,0.4);font-size:24px;cursor:pointer;z-index:150;display:flex;align-items:center;justify-content:center;">
+    💬${dot}
+  </button>`;
+}
+function openCustomerChatFromFab(){
+  state.page='home';
+  setTab('chat');
 }
 
 function renderNav(){
@@ -1057,28 +1084,36 @@ function onBarangayChange(){
 }
 
 function setTab(t){
-  stopChatPolling();
   state.activeTab=t;
   render();
   if(t==='myorders'){
     loadOrders().then(orders=>{ state.orders=orders; if(state.activeTab==='myorders') render(); });
   }
-  if(t==='chat'){
-    startChatPolling();
+  if(t==='chat' && state.chatMessages.length===0){
+    loadMessages(state.user).then(msgs=>{ state.chatMessages=msgs; if(state.activeTab==='chat') render(); });
   }
 }
 function stopChatPolling(){
   if(state.chatPollHandle){ clearInterval(state.chatPollHandle); state.chatPollHandle=null; }
 }
+// Runs continuously (any page/tab) once a customer is logged in, so the floating
+// chat button can show an unread badge and the chat tab stays fresh wherever they are.
 function startChatPolling(){
+  stopChatPolling();
   if(!state.user || state.isAdmin) return;
   const refresh = async ()=>{
     const msgs = await loadMessages(state.user);
     state.chatMessages = msgs;
-    if(state.activeTab==='chat'){
+    const hasUnread = msgs.some(m=>m.sender==='admin' && !m.readByCustomer);
+    if(state.activeTab==='chat' && state.page==='home'){
+      if(hasUnread) markThreadReadByCustomer(state.user);
+      state.customerHasUnread = false;
       render();
       const box = document.getElementById('chat-scroll');
       if(box) box.scrollTop = box.scrollHeight;
+    } else if(state.customerHasUnread !== hasUnread){
+      state.customerHasUnread = hasUnread;
+      render();
     }
   };
   refresh();
@@ -1116,8 +1151,8 @@ async function sendCustomerMessage(){
   const box = document.getElementById('chat-scroll');
   if(box) box.scrollTop = box.scrollHeight;
 }
-function goHome(){stopChatPolling();state.page='home';render();}
-function goCart(){stopChatPolling();state.page='cart';render();}
+function goHome(){state.page='home';render();}
+function goCart(){state.page='cart';render();}
 async function goAdmin(){
   stopChatPolling();
   state.page='admin';
@@ -1297,6 +1332,7 @@ async function doLogin(){
   if(users[u]&&getUserPassword(users[u])===p){
     state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();
     touchUserLogin(u);
+    startChatPolling();
   }
   else{document.getElementById('li-err').textContent='Mali ang username o password.';}
 }
@@ -1308,6 +1344,7 @@ async function doSignup(){
   if(users[u]){document.getElementById('li-err').textContent='Gamit na ang username na iyan.';return;}
   await saveUser(u,p);
   state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();
+  startChatPolling();
 }
 
 render();
