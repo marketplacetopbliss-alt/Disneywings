@@ -203,19 +203,64 @@ function computeDeliveryFee(barangayName){
   return FIRST_KM_FEE + (b.km-1)*ADDITIONAL_KM_FEE;
 }
 
-// In-memory storage (persists during this session only)
+// ===== CLOUD DATABASE (Firebase Realtime Database) =====
+// Para makita sa Admin (anumang device) ang mga order na placed sa customer device,
+// kailangan ng cloud database. Sundin ang steps na ito (libre, 5 minuto lang):
+// 1. Pumunta sa https://console.firebase.google.com -> Add Project (libre)
+// 2. Sa loob ng project, pumunta sa "Build > Realtime Database" -> Create Database
+//    -> piliin ang location -> Start in TEST MODE (para gumana agad)
+// 3. Kunin ang Database URL (parang https://your-project-default-rtdb.asia-southeast1.firebasedatabase.app)
+// 4. I-paste sa ibaba sa FIREBASE_DB_URL
+const FIREBASE_DB_URL = 'https://disneywings-default-rtdb.asia-southeast1.firebasedatabase.app'; // connected ✅
+
+async function loadOrders(){
+  if(!FIREBASE_DB_URL) return MEMORY_ORDERS;
+  try{
+    const res = await fetch(`${FIREBASE_DB_URL}/orders.json`);
+    const data = await res.json();
+    return data ? Object.values(data) : [];
+  }catch(e){ console.error('loadOrders error',e); return MEMORY_ORDERS; }
+}
+async function saveOrder(order){
+  MEMORY_ORDERS.push(order); // local fallback/cache
+  if(!FIREBASE_DB_URL) return;
+  try{
+    await fetch(`${FIREBASE_DB_URL}/orders/${order.orderNum}.json`,{
+      method:'PUT', body: JSON.stringify(order)
+    });
+  }catch(e){ console.error('saveOrder error',e); }
+}
+async function updateOrderField(orderNum, fields){
+  if(!FIREBASE_DB_URL) return;
+  try{
+    await fetch(`${FIREBASE_DB_URL}/orders/${orderNum}.json`,{
+      method:'PATCH', body: JSON.stringify(fields)
+    });
+  }catch(e){ console.error('updateOrderField error',e); }
+}
+async function loadUsers(){
+  if(!FIREBASE_DB_URL) return MEMORY_USERS;
+  try{
+    const res = await fetch(`${FIREBASE_DB_URL}/users.json`);
+    const data = await res.json();
+    return data || {};
+  }catch(e){ console.error('loadUsers error',e); return MEMORY_USERS; }
+}
+async function saveUser(username,password){
+  MEMORY_USERS[username]=password; // local fallback/cache
+  if(!FIREBASE_DB_URL) return;
+  try{
+    await fetch(`${FIREBASE_DB_URL}/users/${username}.json`,{
+      method:'PUT', body: JSON.stringify(password)
+    });
+  }catch(e){ console.error('saveUser error',e); }
+}
 let MEMORY_ORDERS = [];
 let MEMORY_USERS = {};
-function loadOrders(){
-  return MEMORY_ORDERS;
-}
-function saveOrders(orders){
-  MEMORY_ORDERS = orders;
-}
 
 let state = {
   page:'home',loggedIn:false,isAdmin:false,user:null,
-  cart:[],orders:loadOrders(),orderSuccess:false,receipt:null,
+  cart:[],orders:[],orderSuccess:false,receipt:null,
   pendingOrder:null, // order waiting for GCash payment confirmation
   proofOfPayment:null, // base64 screenshot of GCash proof
   deliveryFee:null,
@@ -645,8 +690,14 @@ function renderAdmin(){
   return`<div class="section">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
       <div class="sec-title" style="margin:0;border:none;padding:0;">⚙ Admin — Lahat ng Orders</div>
-      <button class="btn btn-outline" onclick="goHome()">← Bumalik</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-gold" onclick="goAdmin()">🔄 I-refresh</button>
+        <button class="btn btn-outline" onclick="goHome()">← Bumalik</button>
+      </div>
     </div>
+    ${!FIREBASE_DB_URL?`<div style="background:#3d1f00;border:1px solid #e53e3e;border-radius:10px;padding:12px;font-size:12px;color:#ffb74d;margin-bottom:14px;line-height:1.6;">
+      ⚠️ <b>Hindi pa naka-connect sa cloud database.</b> Ang mga order na placed sa ibang device (customer phone) ay hindi makikita dito hangga't hindi naka-setup ang FIREBASE_DB_URL sa code. Tingnan ang instructions sa simula ng &lt;script&gt; tag.
+    </div>`:''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;">
       <div style="background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:12px;text-align:center;">
         <div style="font-size:22px;font-weight:900;color:#f5c518;">${state.orders.length}</div>
@@ -720,7 +771,12 @@ function onBarangayChange(){
 function setTab(t){state.activeTab=t;render();}
 function goHome(){state.page='home';render();}
 function goCart(){state.page='cart';render();}
-function goAdmin(){state.page='admin';render();}
+async function goAdmin(){
+  state.page='admin';
+  render(); // show panel immediately
+  state.orders = await loadOrders();
+  render(); // refresh with latest cloud data
+}
 function goLogin(){state.page='login';render();}
 function logout(){state.loggedIn=false;state.isAdmin=false;state.user=null;state.cart=[];state.page='home';render();}
 
@@ -767,7 +823,7 @@ function getLoyaltyInfo(username, orderNum){
   return {countSoFar, stampInCycle, rewardEarned};
 }
 
-function submitOrder(){
+async function submitOrder(){
   const nm=document.getElementById('f-name')?.value.trim();
   const barangay=document.getElementById('f-barangay')?.value;
   const lc=document.getElementById('f-location')?.value.trim();
@@ -780,6 +836,8 @@ function submitOrder(){
     alert('Para sa barangay na ito, tatawagan ka muna namin para sa delivery fee bago ma-confirm ang order. I-message mo na lang kami sa Facebook Page: Disney Wing\'s, o tawagan ang 09302979452.');
     return;
   }
+  // Refresh latest orders from cloud so order numbers + loyalty counts are accurate across devices
+  state.orders = await loadOrders();
   const subtotal=state.cart.reduce((a,i)=>a+i.price,0);
   const total=subtotal+deliveryFee;
   const orderDraft={
@@ -801,12 +859,12 @@ function submitOrder(){
 
   // COD / Pickup - place order immediately
   orderDraft.status = 'new';
-  finalizeOrder(orderDraft);
+  await finalizeOrder(orderDraft);
 }
 
-function finalizeOrder(orderDraft){
+async function finalizeOrder(orderDraft){
   state.orders.push(orderDraft);
-  saveOrders(state.orders);
+  await saveOrder(orderDraft);
   state.receipt = orderDraft;
   state.orderSuccess = true;
   state.cart = [];
@@ -835,7 +893,7 @@ function onProofUpload(){
   reader.readAsDataURL(file);
 }
 
-function confirmGcashPayment(){
+async function confirmGcashPayment(){
   if(!state.pendingOrder) return;
   if(!state.proofOfPayment){
     alert('I-upload muna ang screenshot ng proof of payment bago ma-confirm ang order.');
@@ -843,7 +901,7 @@ function confirmGcashPayment(){
   }
   const order = {...state.pendingOrder, status:'new', proofOfPayment: state.proofOfPayment};
   state.proofOfPayment = null;
-  finalizeOrder(order);
+  await finalizeOrder(order);
 }
 
 function cancelGcashOrder(){
@@ -858,30 +916,35 @@ function viewReceipt(orderNum){
   const o = state.orders.find(x=>x.orderNum===orderNum);
   if(o){ state.receipt=o; state.page='receipt'; render(); }
 }
-function setStatus(orderNum,status){
+async function setStatus(orderNum,status){
   const o = state.orders.find(x=>x.orderNum===orderNum);
-  if(o){ o.status=status; saveOrders(state.orders); render(); }
+  if(o){ o.status=status; await updateOrderField(orderNum,{status}); render(); }
 }
 
-function doLogin(){
+async function doLogin(){
   const u=document.getElementById('li-u').value.trim();
   const p=document.getElementById('li-p').value.trim();
   if(!u||!p){document.getElementById('li-err').textContent='Punan ang username at password.';return;}
   if(u===ADMIN.user&&p===ADMIN.pass){state.loggedIn=true;state.isAdmin=true;state.user='Admin';state.page='home';render();return;}
-  if(MEMORY_USERS[u]&&MEMORY_USERS[u]===p){state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();}
+  const users = await loadUsers();
+  if(users[u]&&users[u]===p){state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();}
   else{document.getElementById('li-err').textContent='Mali ang username o password.';}
 }
-function doSignup(){
+async function doSignup(){
   const u=document.getElementById('li-u').value.trim();
   const p=document.getElementById('li-p').value.trim();
   if(!u||!p){document.getElementById('li-err').textContent='Punan ang lahat ng fields.';return;}
-  let stored=MEMORY_USERS;
-  if(stored[u]){document.getElementById('li-err').textContent='Gamit na ang username na iyan.';return;}
-  stored[u]=p;
+  const users = await loadUsers();
+  if(users[u]){document.getElementById('li-err').textContent='Gamit na ang username na iyan.';return;}
+  await saveUser(u,p);
   state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();
 }
 
 render();
+(async function initApp(){
+  state.orders = await loadOrders();
+  if(state.page==='admin') render();
+})();
 </script>
 </body>
 </html>
