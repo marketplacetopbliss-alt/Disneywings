@@ -246,14 +246,47 @@ async function loadUsers(){
     return data || {};
   }catch(e){ console.error('loadUsers error',e); return MEMORY_USERS; }
 }
+// Normalizes a user record so old (plain string password) and new (object) formats both work.
+function getUserPassword(entry){
+  return typeof entry === 'string' ? entry : (entry ? entry.password : undefined);
+}
 async function saveUser(username,password){
-  MEMORY_USERS[username]=password; // local fallback/cache
+  const record = { password, createdAt: Date.now(), lastLogin: Date.now() };
+  MEMORY_USERS[username]=record; // local fallback/cache
   if(!FIREBASE_DB_URL) return;
   try{
     await fetch(`${FIREBASE_DB_URL}/users/${username}.json`,{
-      method:'PUT', body: JSON.stringify(password)
+      method:'PUT', body: JSON.stringify(record)
     });
   }catch(e){ console.error('saveUser error',e); }
+}
+async function touchUserLogin(username){
+  if(!FIREBASE_DB_URL) return;
+  try{
+    await fetch(`${FIREBASE_DB_URL}/users/${username}.json`,{
+      method:'PATCH', body: JSON.stringify({lastLogin: Date.now()})
+    });
+  }catch(e){ console.error('touchUserLogin error',e); }
+}
+// VISIT TRACKING — logs once per browser tab/session (not on every click) so the
+// admin can see how many people opened the site, logged in or not.
+async function logVisit(){
+  if(sessionStorage.getItem('dw_visit_logged')) return;
+  sessionStorage.setItem('dw_visit_logged','1');
+  if(!FIREBASE_DB_URL) return;
+  try{
+    await fetch(`${FIREBASE_DB_URL}/visits.json`,{
+      method:'POST', body: JSON.stringify({ timestamp: Date.now(), username: state.user || 'Guest' })
+    });
+  }catch(e){ console.error('logVisit error',e); }
+}
+async function loadVisits(){
+  if(!FIREBASE_DB_URL) return [];
+  try{
+    const res = await fetch(`${FIREBASE_DB_URL}/visits.json`);
+    const data = await res.json();
+    return data ? Object.values(data) : [];
+  }catch(e){ console.error('loadVisits error',e); return []; }
 }
 let MEMORY_ORDERS = [];
 let MEMORY_USERS = {};
@@ -266,6 +299,7 @@ let state = {
   deliveryFee:null,
   loginForm:{user:'',pass:''},
   modal:null,activeTab:'menu',
+  users:{}, visits:[], adminTab:'orders', // for admin "Users & Visits" view
 };
 
 function render(){
@@ -717,13 +751,9 @@ function renderLogin(){
 }
 
 function renderAdmin(){
-  const all = [...state.orders].reverse();
-  const totalRevenue = state.orders.filter(o=>o.status!=='cancelled').reduce((a,o)=>a+o.total,0);
-  const todayStr = new Date().toDateString();
-  const todayOrders = state.orders.filter(o=>new Date(o.timestamp).toDateString()===todayStr);
   return`<div class="section">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
-      <div class="sec-title" style="margin:0;border:none;padding:0;">⚙ Admin — Lahat ng Orders</div>
+      <div class="sec-title" style="margin:0;border:none;padding:0;">⚙ Admin</div>
       <div style="display:flex;gap:8px;">
         <button class="btn btn-gold" onclick="goAdmin()">🔄 I-refresh</button>
         <button class="btn btn-outline" onclick="goHome()">← Bumalik</button>
@@ -732,6 +762,21 @@ function renderAdmin(){
     ${!FIREBASE_DB_URL?`<div style="background:#3d1f00;border:1px solid #e53e3e;border-radius:10px;padding:12px;font-size:12px;color:#ffb74d;margin-bottom:14px;line-height:1.6;">
       ⚠️ <b>Hindi pa naka-connect sa cloud database.</b> Ang mga order na placed sa ibang device (customer phone) ay hindi makikita dito hangga't hindi naka-setup ang FIREBASE_DB_URL sa code. Tingnan ang instructions sa simula ng &lt;script&gt; tag.
     </div>`:''}
+    <div class="tabs">
+      <button class="tab ${state.adminTab==='orders'?'active':''}" onclick="setAdminTab('orders')">🧾 Orders</button>
+      <button class="tab ${state.adminTab==='users'?'active':''}" onclick="setAdminTab('users')">👥 Users & Visits</button>
+    </div>
+    ${state.adminTab==='orders'?renderAdminOrders():''}
+    ${state.adminTab==='users'?renderAdminUsers():''}
+  </div>`;
+}
+
+function renderAdminOrders(){
+  const all = [...state.orders].reverse();
+  const totalRevenue = state.orders.filter(o=>o.status!=='cancelled').reduce((a,o)=>a+o.total,0);
+  const todayStr = new Date().toDateString();
+  const todayOrders = state.orders.filter(o=>new Date(o.timestamp).toDateString()===todayStr);
+  return`
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;">
       <div style="background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:12px;text-align:center;">
         <div style="font-size:22px;font-weight:900;color:#f5c518;">${state.orders.length}</div>
@@ -770,8 +815,78 @@ function renderAdmin(){
           <button class="btn btn-outline" style="font-size:11px;padding:5px 10px;" onclick="viewReceipt('${o.orderNum}')">🧾 Resibo</button>
         </div>
       </div>
-    `).join('')}
-  </div>`;
+    `).join('')}`;
+}
+
+function renderAdminUsers(){
+  const userEntries = Object.entries(state.users||{}).sort((a,b)=>{
+    const ca = (typeof a[1]==='object'&&a[1].createdAt)||0;
+    const cb = (typeof b[1]==='object'&&b[1].createdAt)||0;
+    return cb-ca;
+  });
+  const ordersByUser = {};
+  state.orders.forEach(o=>{ ordersByUser[o.username]=(ordersByUser[o.username]||0)+1; });
+  const visits = [...(state.visits||[])].sort((a,b)=>b.timestamp-a.timestamp);
+
+  return `
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;">
+    <div style="background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:12px;text-align:center;">
+      <div style="font-size:22px;font-weight:900;color:#f5c518;">${userEntries.length}</div>
+      <div style="font-size:11px;color:#aaa;">Registered Accounts</div>
+    </div>
+    <div style="background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:12px;text-align:center;">
+      <div style="font-size:22px;font-weight:900;color:#38a169;">${visits.length}</div>
+      <div style="font-size:11px;color:#aaa;">Total Visits (logged-in &amp; guest)</div>
+    </div>
+  </div>
+
+  <div class="sec-title" style="font-size:14px;">👤 Mga Naka-Account</div>
+  ${userEntries.length===0?`<div class="empty-cart">Wala pang naka-account.</div>`:`
+  <div class="admin-panel" style="padding:0;overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead>
+        <tr style="background:#1a1a1a;color:#f5c518;text-align:left;">
+          <th style="padding:8px 10px;">Username</th>
+          <th style="padding:8px 10px;">Sign Up</th>
+          <th style="padding:8px 10px;">Last Login</th>
+          <th style="padding:8px 10px;">Orders</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${userEntries.map(([username,entry])=>{
+          const createdAt = typeof entry==='object'&&entry.createdAt ? new Date(entry.createdAt).toLocaleString('en-PH') : '—';
+          const lastLogin = typeof entry==='object'&&entry.lastLogin ? new Date(entry.lastLogin).toLocaleString('en-PH') : '—';
+          const orderCount = ordersByUser[username]||0;
+          return `<tr style="border-bottom:1px solid #222;color:#ccc;">
+            <td style="padding:7px 10px;font-weight:700;color:#fff;">${username}</td>
+            <td style="padding:7px 10px;">${createdAt}</td>
+            <td style="padding:7px 10px;">${lastLogin}</td>
+            <td style="padding:7px 10px;">${orderCount}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+  </div>`}
+
+  <div class="sec-title" style="font-size:14px;margin-top:18px;">🌐 Recent Site Visits</div>
+  <div style="font-size:11px;color:#777;margin-bottom:10px;">Isang entry kada bagong session/tab na nagbukas ng site (kahit hindi nag-login). "Guest" = hindi naka-login nung bumisita.</div>
+  ${visits.length===0?`<div class="empty-cart">Wala pang naitalang visit.</div>`:`
+  <div class="admin-panel" style="padding:0;overflow-x:auto;max-height:340px;overflow-y:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead>
+        <tr style="background:#1a1a1a;color:#f5c518;text-align:left;position:sticky;top:0;">
+          <th style="padding:8px 10px;">Date / Time</th>
+          <th style="padding:8px 10px;">Visitor</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${visits.slice(0,200).map(v=>`<tr style="border-bottom:1px solid #222;color:#ccc;">
+          <td style="padding:7px 10px;">${new Date(v.timestamp).toLocaleString('en-PH')}</td>
+          <td style="padding:7px 10px;${v.username&&v.username!=='Guest'?'color:#f5c518;font-weight:700;':''}">${v.username||'Guest'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  </div>`}`;
 }
 
 // ACTIONS
@@ -815,8 +930,11 @@ async function goAdmin(){
   state.page='admin';
   render(); // show panel immediately
   state.orders = await loadOrders();
+  state.users = await loadUsers();
+  state.visits = await loadVisits();
   render(); // refresh with latest cloud data
 }
+function setAdminTab(t){ state.adminTab=t; render(); }
 function goLogin(){state.page='login';render();}
 function logout(){state.loggedIn=false;state.isAdmin=false;state.user=null;state.cart=[];state.page='home';render();}
 
@@ -976,7 +1094,10 @@ async function doLogin(){
   if(!u||!p){document.getElementById('li-err').textContent='Punan ang username at password.';return;}
   if(u===ADMIN.user&&p===ADMIN.pass){state.loggedIn=true;state.isAdmin=true;state.user='Admin';state.page='home';render();return;}
   const users = await loadUsers();
-  if(users[u]&&users[u]===p){state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();}
+  if(users[u]&&getUserPassword(users[u])===p){
+    state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();
+    touchUserLogin(u);
+  }
   else{document.getElementById('li-err').textContent='Mali ang username o password.';}
 }
 async function doSignup(){
@@ -993,6 +1114,7 @@ render();
 (async function initApp(){
   state.orders = await loadOrders();
   if(state.page==='admin') render();
+  logVisit();
 })();
 </script>
 </body>
