@@ -123,10 +123,15 @@ nav{background:#111;border-bottom:2px solid #f5c518;padding:10px 16px;display:fl
 .chat-bubble-customer{align-self:flex-end;background:#f5c518;color:#000;border-bottom-right-radius:3px;}
 .chat-bubble-admin{align-self:flex-start;background:#222;color:#fff;border-bottom-left-radius:3px;}
 .chat-bubble-time{font-size:9px;opacity:0.6;margin-top:3px;}
-.chat-input-row{display:flex;gap:8px;padding:10px;border-top:1px solid #333;}
-.chat-input-row input{flex:1;background:#1a1a1a;border:1px solid #444;border-radius:20px;padding:9px 14px;color:#fff;font-size:13px;outline:none;}
-.chat-input-row input:focus{border-color:#f5c518;}
+.chat-input-row{display:flex;gap:6px;padding:10px;border-top:1px solid #333;align-items:flex-end;}
+.chat-input-row textarea{flex:1;background:#1a1a1a;border:1px solid #444;border-radius:18px;padding:9px 14px;color:#fff;font-size:13px;outline:none;font-family:inherit;resize:none;max-height:120px;overflow-y:auto;line-height:1.4;}
+.chat-input-row textarea:focus{border-color:#f5c518;}
+.chat-icon-btn{flex-shrink:0;width:36px;height:36px;border-radius:50%;border:1px solid #444;background:#1a1a1a;color:#f5c518;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;}
+.chat-icon-btn:hover{background:#f5c518;color:#000;}
+.chat-input-row .btn-gold{flex-shrink:0;border-radius:18px;}
 .chat-empty{color:#555;text-align:center;margin:auto;font-size:12px;}
+.chat-bubble img.chat-img{max-width:100%;border-radius:10px;display:block;margin-top:2px;cursor:pointer;}
+.chat-bubble a.chat-location{color:inherit;text-decoration:underline;font-weight:700;}
 .thread-item{background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:border-color 0.15s;}
 .thread-item:hover,.thread-item.active{border-color:#f5c518;}
 .thread-item-unread{border-color:#e53e3e;}
@@ -326,12 +331,23 @@ async function loadAllThreads(){
     }).sort((a,b)=>b.lastTimestamp-a.lastTimestamp);
   }catch(e){ console.error('loadAllThreads error',e); return []; }
 }
-async function sendMessage(username, sender, text){
-  if(!FIREBASE_DB_URL || !text || !text.trim()) return;
+async function sendMessage(username, sender, text, extra){
+  extra = extra || {};
+  const type = extra.type || 'text';
+  if(!FIREBASE_DB_URL) return;
+  if(type==='text' && (!text || !text.trim())) return;
   try{
+    const payload = {
+      sender, type,
+      text: text ? text.trim() : '',
+      timestamp: Date.now(),
+      readByAdmin: sender==='admin', readByCustomer: sender==='customer'
+    };
+    if(type==='image') payload.imageData = extra.imageData;
+    if(type==='location'){ payload.lat = extra.lat; payload.lng = extra.lng; }
     await fetch(`${FIREBASE_DB_URL}/messages/${username}.json`,{
       method:'POST',
-      body: JSON.stringify({ sender, text: text.trim(), timestamp: Date.now(), readByAdmin: sender==='admin', readByCustomer: sender==='customer' })
+      body: JSON.stringify(payload)
     });
   }catch(e){ console.error('sendMessage error',e); }
 }
@@ -994,12 +1010,15 @@ function renderAdminMessages(){
         ${state.adminChatMessages.length===0?`<div class="chat-empty">Wala pang mensahe.</div>`:
           state.adminChatMessages.map(m=>`
           <div class="chat-bubble chat-bubble-${m.sender==='admin'?'admin':'customer'}">
-            ${escapeHtml(m.text)}
+            ${renderChatBubbleContent(m)}
             <div class="chat-bubble-time">${m.sender==='admin'?'Ikaw':u} • ${new Date(m.timestamp).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'})}</div>
           </div>`).join('')}
       </div>
       <div class="chat-input-row">
-        <input type="text" id="admin-chat-input" placeholder="I-type ang sagot..." onkeydown="if(event.key==='Enter')sendAdminReply()">
+        <input type="file" id="admin-chat-file" accept="image/*" style="display:none;" onchange="sendAdminImage()">
+        <button class="chat-icon-btn" title="Magpadala ng larawan" onclick="document.getElementById('admin-chat-file').click()">📷</button>
+        <button class="chat-icon-btn" title="I-share ang lokasyon" onclick="sendAdminLocation()">📍</button>
+        <textarea id="admin-chat-input" rows="1" placeholder="I-type ang sagot..." oninput="autoGrowChatInput(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAdminReply();}"></textarea>
         <button class="btn btn-gold" onclick="sendAdminReply()">Send</button>
       </div>
     </div>`;
@@ -1126,18 +1145,31 @@ function renderCustomerChat(){
       ${state.chatMessages.length===0?`<div class="chat-empty">Mag-message para magtanong tungkol sa order mo! 🍗</div>`:
         state.chatMessages.map(m=>`
         <div class="chat-bubble chat-bubble-${m.sender==='admin'?'admin':'customer'}">
-          ${escapeHtml(m.text)}
+          ${renderChatBubbleContent(m)}
           <div class="chat-bubble-time">${m.sender==='admin'?'Disney Wings':'Ikaw'} • ${new Date(m.timestamp).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'})}</div>
         </div>`).join('')}
     </div>
     <div class="chat-input-row">
-      <input type="text" id="chat-input" placeholder="I-type ang mensahe mo..." onkeydown="if(event.key==='Enter')sendCustomerMessage()">
+      <input type="file" id="chat-file" accept="image/*" style="display:none;" onchange="sendCustomerImage()">
+      <button class="chat-icon-btn" title="Magpadala ng larawan" onclick="document.getElementById('chat-file').click()">📷</button>
+      <button class="chat-icon-btn" title="I-share ang lokasyon" onclick="sendCustomerLocation()">📍</button>
+      <textarea id="chat-input" rows="1" placeholder="I-type ang mensahe mo..." oninput="autoGrowChatInput(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendCustomerMessage();}"></textarea>
       <button class="btn btn-gold" onclick="sendCustomerMessage()">Send</button>
     </div>
   </div>`;
 }
 function escapeHtml(str){
   const d = document.createElement('div'); d.textContent = str; return d.innerHTML;
+}
+function renderChatBubbleContent(m){
+  if(m.type==='image' && m.imageData){
+    return `<img class="chat-img" src="${m.imageData}" onclick="window.open('${m.imageData}','_blank')">${m.text?`<div style="margin-top:4px;">${escapeHtml(m.text)}</div>`:''}`;
+  }
+  if(m.type==='location' && m.lat!=null && m.lng!=null){
+    const url = `https://www.google.com/maps?q=${m.lat},${m.lng}`;
+    return `📍 <a class="chat-location" href="${url}" target="_blank" rel="noopener">I-tap para makita ang lokasyon sa Google Maps</a>`;
+  }
+  return escapeHtml(m.text);
 }
 async function sendCustomerMessage(){
   const input = document.getElementById('chat-input');
@@ -1150,6 +1182,89 @@ async function sendCustomerMessage(){
   render();
   const box = document.getElementById('chat-scroll');
   if(box) box.scrollTop = box.scrollHeight;
+}
+function autoGrowChatInput(el){
+  el.style.height='auto';
+  el.style.height=Math.min(el.scrollHeight,120)+'px';
+}
+// Resizes/compresses an image file client-side before sending, so chat photos don't
+// blow up the Firebase free-tier database with huge base64 payloads.
+function resizeImageFile(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = e=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const maxDim = 1000;
+        let {width,height} = img;
+        if(width>maxDim || height>maxDim){
+          if(width>height){ height = Math.round(height*(maxDim/width)); width = maxDim; }
+          else{ width = Math.round(width*(maxDim/height)); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img,0,0,width,height);
+        resolve(canvas.toDataURL('image/jpeg',0.7));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+async function sendCustomerImage(){
+  const fileInput = document.getElementById('chat-file');
+  const file = fileInput.files[0];
+  if(!file) return;
+  try{
+    const dataUrl = await resizeImageFile(file);
+    await sendMessage(state.user, 'customer', '', {type:'image', imageData:dataUrl});
+    state.chatMessages = await loadMessages(state.user);
+    render();
+    const box = document.getElementById('chat-scroll');
+    if(box) box.scrollTop = box.scrollHeight;
+  }catch(e){ console.error('sendCustomerImage error',e); alert('Hindi na-send ang larawan. Subukan ulit.'); }
+  fileInput.value='';
+}
+function sendCustomerLocation(){
+  if(!navigator.geolocation){ alert('Hindi supported ng browser mo ang pag-share ng lokasyon.'); return; }
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    await sendMessage(state.user, 'customer', '', {type:'location', lat:pos.coords.latitude, lng:pos.coords.longitude});
+    state.chatMessages = await loadMessages(state.user);
+    render();
+    const box = document.getElementById('chat-scroll');
+    if(box) box.scrollTop = box.scrollHeight;
+  }, err=>{
+    alert('Hindi makuha ang lokasyon mo. Paki-check ang location permission sa browser.');
+  }, {enableHighAccuracy:true, timeout:10000});
+}
+async function sendAdminImage(){
+  const fileInput = document.getElementById('admin-chat-file');
+  const file = fileInput.files[0];
+  if(!file || !state.adminChatUser) return;
+  try{
+    const dataUrl = await resizeImageFile(file);
+    await sendMessage(state.adminChatUser, 'admin', '', {type:'image', imageData:dataUrl});
+    state.adminChatMessages = await loadMessages(state.adminChatUser);
+    render();
+    const box = document.getElementById('admin-chat-scroll');
+    if(box) box.scrollTop = box.scrollHeight;
+  }catch(e){ console.error('sendAdminImage error',e); alert('Hindi na-send ang larawan. Subukan ulit.'); }
+  fileInput.value='';
+}
+function sendAdminLocation(){
+  if(!state.adminChatUser) return;
+  if(!navigator.geolocation){ alert('Hindi supported ng browser mo ang pag-share ng lokasyon.'); return; }
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    await sendMessage(state.adminChatUser, 'admin', '', {type:'location', lat:pos.coords.latitude, lng:pos.coords.longitude});
+    state.adminChatMessages = await loadMessages(state.adminChatUser);
+    render();
+    const box = document.getElementById('admin-chat-scroll');
+    if(box) box.scrollTop = box.scrollHeight;
+  }, err=>{
+    alert('Hindi makuha ang lokasyon mo. Paki-check ang location permission sa browser.');
+  }, {enableHighAccuracy:true, timeout:10000});
 }
 function goHome(){state.page='home';render();}
 function goCart(){state.page='cart';render();}
