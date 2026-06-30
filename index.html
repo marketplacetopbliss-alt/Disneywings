@@ -382,8 +382,83 @@ async function markThreadReadByAdmin(username){
 let MEMORY_ORDERS = [];
 let MEMORY_USERS = {};
 
+// ===== BROWSER NOTIFICATIONS =====
+// Pop-up notifications (kahit naka-minimize ang tab) para sa bagong order/mensahe (admin)
+// at status update/reply (customer). Hihingi ng permission sa user pagka-login.
+function requestNotifPermission(){
+  if('Notification' in window && Notification.permission==='default'){
+    Notification.requestPermission().catch(()=>{});
+  }
+}
+function notifyBrowser(title, body, tag){
+  try{
+    if('Notification' in window && Notification.permission==='granted'){
+      const n = new Notification(title, { body, icon: IMG_LOGO, tag });
+      n.onclick = ()=>{ window.focus(); n.close(); };
+    }
+  }catch(e){ console.error('notifyBrowser error', e); }
+}
+
+let adminNotifPollHandle = null;
+let adminKnownOrderNums = new Set();
+let adminKnownUnreadThreads = new Set();
+let adminNotifInitialized = false;
+function stopAdminNotifPolling(){ if(adminNotifPollHandle){ clearInterval(adminNotifPollHandle); adminNotifPollHandle=null; } }
+// Runs in the background once Admin is logged in: notifies for (1) bagong order, (2) bagong customer message.
+function startAdminNotifPolling(){
+  stopAdminNotifPolling();
+  if(!state.isAdmin) return;
+  const check = async ()=>{
+    try{
+      const orders = await loadOrders();
+      orders.forEach(o=>{
+        if(!adminKnownOrderNums.has(o.orderNum)){
+          if(adminNotifInitialized){
+            notifyBrowser('🔔 Bagong Order — Disney Wings', `Order #${o.orderNum} mula kay ${o.name} — ₱${(o.total||0).toLocaleString()}`, 'dw-order-'+o.orderNum);
+          }
+          adminKnownOrderNums.add(o.orderNum);
+        }
+      });
+      if(state.page==='admin'){ state.orders = orders; if(state.adminTab==='orders') render(); }
+      const threads = await loadAllThreads();
+      threads.forEach(t=>{
+        const key = t.username+':'+t.lastTimestamp;
+        if(t.unread && !adminKnownUnreadThreads.has(key)){
+          if(adminNotifInitialized){
+            notifyBrowser('💬 Bagong Mensahe — Disney Wings', `${t.username}: ${t.lastText||'(larawan/lokasyon)'}`, 'dw-thread-'+t.username);
+          }
+          adminKnownUnreadThreads.add(key);
+        }
+      });
+      adminNotifInitialized = true;
+      if(state.page==='admin'&&state.adminTab==='messages'&&!state.adminChatUser){ state.chatThreads = threads; render(); }
+    }catch(e){ console.error('admin notif poll error', e); }
+  };
+  check();
+  adminNotifPollHandle = setInterval(check, 6000);
+}
+
+let myOrderStatusCache = {};
+// Runs in the background once a Customer is logged in: notifies pag may status update ang order nila
+// (hal. "Inihahanda" -> "Handa Na/Idedeliver"). Tinatawag kasama ng chat poll para iisang interval lang.
+async function checkMyOrderStatusUpdates(){
+  if(!state.user || state.isAdmin) return;
+  try{
+    const orders = await loadOrders();
+    const statusLabel = {new:'Natanggap na ang order mo',preparing:'Inihahanda na ang order mo',ready:'Handa na at idedeliver na ang order mo! 🛵',done:'Na-deliver na ang order mo',pending_payment:'Hinihintay ang GCash payment mo',cancelled:'Na-cancel ang order'};
+    orders.filter(o=>o.username===state.user).forEach(o=>{
+      const prev = myOrderStatusCache[o.orderNum];
+      if(prev!==undefined && prev!==o.status){
+        notifyBrowser('📦 Order Update — Disney Wings', `Order #${o.orderNum}: ${statusLabel[o.status]||o.status}`, 'dw-status-'+o.orderNum);
+      }
+      myOrderStatusCache[o.orderNum] = o.status;
+    });
+  }catch(e){ console.error('checkMyOrderStatusUpdates error', e); }
+}
+
+
 let state = {
-  page:'home',loggedIn:false,isAdmin:false,user:null,
+  page:'home',loggedIn:false,isAdmin:false,user:null,authMode:'login',
   cart:[],orders:[],orderSuccess:false,receipt:null,
   pendingOrder:null, // order waiting for GCash payment confirmation
   proofOfPayment:null, // base64 screenshot of GCash proof
@@ -487,6 +562,8 @@ function renderHomePage(){
       <button class="tab ${state.activeTab==='gallery'?'active':''}" onclick="setTab('gallery')">📸 Gallery</button>
       <button class="tab ${state.activeTab==='info'?'active':''}" onclick="setTab('info')">ℹ️ Info</button>
     </div>
+    ${state.activeTab==='menu'&&!state.loggedIn?`<div class="info-banner">📝 <b>Paalala:</b> Kailangan munang gumawa ng account (Sign Up) bago makapag-order. I-tap lang ang "Login / Sign Up" sa taas.</div>`:''}
+    ${state.activeTab==='menu'&&state.loggedIn&&!state.isAdmin?notifPermBanner():''}
     ${state.activeTab==='menu'?renderMenu():''}
     ${state.activeTab==='myorders'?renderMyOrders():''}
     ${state.activeTab==='chat'?renderCustomerChat():''}
@@ -863,12 +940,18 @@ function renderReceiptPage(){
 }
 
 function renderLogin(){
+  const mode = state.authMode || 'login';
   return`${renderNav()}<div class="section">
     <div class="login-box">
       <img src="${IMG_LOGO}" style="width:64px;height:64px;border-radius:12px;margin-bottom:8px;">
       <h2>Disney Wings</h2>
-      <p>Login o mag-sign up para makapag-order</p>
-      <div class="form-group" style="text-align:left;">
+      <div class="info-banner" style="text-align:left;">📝 <b>Paalala:</b> Kailangan munang gumawa ng account (<b>Sign Up</b>) bago makapag-order. Kung may account ka na, piliin ang <b>Login</b>.</div>
+      <div class="tabs" style="margin-bottom:14px;">
+        <button class="tab ${mode==='login'?'active':''}" onclick="setAuthMode('login')">🔑 Login</button>
+        <button class="tab ${mode==='signup'?'active':''}" onclick="setAuthMode('signup')">🆕 Sign Up</button>
+      </div>
+      <p>${mode==='login'?'Mayroon ka nang account? Mag-login ka dito.':'Bagong customer? Gumawa ng libreng account dito bago mag-order.'}</p>
+      <div class="form-group" style="text-align:left;margin-top:14px;">
         <label>Username</label>
         <input type="text" id="li-u" placeholder="Username mo">
       </div>
@@ -877,12 +960,16 @@ function renderLogin(){
         <input type="password" id="li-p" placeholder="Password mo">
       </div>
       <div id="li-err" style="color:#e53e3e;font-size:11px;margin-bottom:8px;"></div>
-      <button class="btn btn-gold" style="width:100%;padding:11px;font-size:14px;margin-bottom:8px;" onclick="doLogin()">Login</button>
-      <button class="btn btn-outline" style="width:100%;padding:11px;font-size:14px;" onclick="doSignup()">Sign Up (Libre!)</button>
-      <button class="btn" style="width:100%;padding:7px;font-size:12px;color:#666;margin-top:6px;background:none;border:none;cursor:pointer;" onclick="goHome()">← Bumalik sa Menu</button>
+      ${mode==='login'
+        ?`<button class="btn btn-gold" style="width:100%;padding:11px;font-size:14px;" onclick="doLogin()">Login</button>
+          <div style="font-size:11px;color:#888;margin-top:10px;">Wala ka pang account? <a href="javascript:void(0)" onclick="setAuthMode('signup')" style="color:#f5c518;font-weight:700;">Mag-sign up dito</a>.</div>`
+        :`<button class="btn btn-gold" style="width:100%;padding:11px;font-size:14px;" onclick="doSignup()">Gumawa ng Account (Libre!)</button>
+          <div style="font-size:11px;color:#888;margin-top:10px;">May account ka na? <a href="javascript:void(0)" onclick="setAuthMode('login')" style="color:#f5c518;font-weight:700;">Mag-login dito</a>.</div>`}
+      <button class="btn" style="width:100%;padding:7px;font-size:12px;color:#666;margin-top:10px;background:none;border:none;cursor:pointer;" onclick="goHome()">← Bumalik sa Menu</button>
     </div>
   </div>`;
 }
+function setAuthMode(m){ state.authMode=m; render(); }
 
 function renderAdmin(){
   return`<div class="section">
@@ -893,6 +980,7 @@ function renderAdmin(){
         <button class="btn btn-outline" onclick="goHome()">← Bumalik</button>
       </div>
     </div>
+    ${notifPermBanner()}
     ${!FIREBASE_DB_URL?`<div style="background:#3d1f00;border:1px solid #e53e3e;border-radius:10px;padding:12px;font-size:12px;color:#ffb74d;margin-bottom:14px;line-height:1.6;">
       ⚠️ <b>Hindi pa naka-connect sa cloud database.</b> Ang mga order na placed sa ibang device (customer phone) ay hindi makikita dito hangga't hindi naka-setup ang FIREBASE_DB_URL sa code. Tingnan ang instructions sa simula ng &lt;script&gt; tag.
     </div>`:''}
@@ -1149,6 +1237,7 @@ function startChatPolling(){
   if(!state.user || state.isAdmin) return;
   const refresh = async ()=>{
     const msgs = await loadMessages(state.user);
+    const prevUnread = state.customerHasUnread;
     state.chatMessages = msgs;
     const hasUnread = msgs.some(m=>m.sender==='admin' && !m.readByCustomer);
     if(state.activeTab==='chat' && state.page==='home'){
@@ -1158,9 +1247,13 @@ function startChatPolling(){
       const box = document.getElementById('chat-scroll');
       if(box) box.scrollTop = box.scrollHeight;
     } else if(state.customerHasUnread !== hasUnread){
+      if(hasUnread && !prevUnread){
+        notifyBrowser('💬 Bagong Mensahe — Disney Wings', 'May bagong sagot mula sa Disney Wings.', 'dw-customer-chat');
+      }
       state.customerHasUnread = hasUnread;
       render();
     }
+    checkMyOrderStatusUpdates();
   };
   refresh();
   state.chatPollHandle = setInterval(refresh, 4000);
@@ -1184,6 +1277,12 @@ function renderCustomerChat(){
       <button class="btn btn-gold" onclick="sendCustomerMessage()">Send</button>
     </div>
   </div>`;
+}
+function notifPermBanner(){
+  if(!('Notification' in window)) return '';
+  if(Notification.permission==='granted') return `<div class="info-banner">🔔 Naka-on ang notifications. May popup ka pag may bagong order/mensahe.</div>`;
+  if(Notification.permission==='denied') return `<div class="info-banner" style="color:#ff6b35;border-color:#ff6b35;">🔕 Naka-block ang notifications sa browser mo. I-enable sa browser settings para makatanggap ng alerts kahit naka-minimize ang tab.</div>`;
+  return `<div class="info-banner">🔔 <a href="javascript:void(0)" onclick="requestNotifPermission()" style="color:#f5c518;font-weight:700;">I-enable ang notifications</a> para may popup pag may bagong order/mensahe, kahit naka-minimize ang tab.</div>`;
 }
 function escapeHtml(str){
   const d = document.createElement('div'); d.textContent = str; return d.innerHTML;
@@ -1311,7 +1410,7 @@ function setAdminTab(t){
   }
 }
 function goLogin(){state.page='login';render();}
-function logout(){stopChatPolling();stopAdminChatPolling();state.loggedIn=false;state.isAdmin=false;state.user=null;state.cart=[];state.page='home';render();}
+function logout(){stopChatPolling();stopAdminChatPolling();stopAdminNotifPolling();adminNotifInitialized=false;adminKnownOrderNums=new Set();adminKnownUnreadThreads=new Set();state.loggedIn=false;state.isAdmin=false;state.user=null;state.cart=[];state.page='home';render();}
 
 function openItem(id){
   if(!state.loggedIn){goLogin();return;}
@@ -1467,11 +1566,17 @@ async function doLogin(){
   const u=document.getElementById('li-u').value.trim();
   const p=document.getElementById('li-p').value.trim();
   if(!u||!p){document.getElementById('li-err').textContent='Punan ang username at password.';return;}
-  if(u===ADMIN.user&&p===ADMIN.pass){state.loggedIn=true;state.isAdmin=true;state.user='Admin';state.page='home';render();return;}
+  if(u===ADMIN.user&&p===ADMIN.pass){
+    state.loggedIn=true;state.isAdmin=true;state.user='Admin';state.page='home';render();
+    requestNotifPermission();
+    startAdminNotifPolling();
+    return;
+  }
   const users = await loadUsers();
   if(users[u]&&getUserPassword(users[u])===p){
     state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();
     touchUserLogin(u);
+    requestNotifPermission();
     startChatPolling();
   }
   else{document.getElementById('li-err').textContent='Mali ang username o password.';}
@@ -1484,6 +1589,7 @@ async function doSignup(){
   if(users[u]){document.getElementById('li-err').textContent='Gamit na ang username na iyan.';return;}
   await saveUser(u,p);
   state.loggedIn=true;state.isAdmin=false;state.user=u;state.page='home';render();
+  requestNotifPermission();
   startChatPolling();
 }
 
